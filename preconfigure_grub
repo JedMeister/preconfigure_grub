@@ -1,0 +1,57 @@
+#!/bin/bash -e
+
+[[ -z "$DEBUG" ]] || set -x
+
+fatal() { echo "FATAL: $@"; exit 1 ; }
+warn() { echo "WARN: $@" >&2; }
+info() { echo "INFO: $@"; }
+
+check4grub() {
+    dd if=$1 bs=1 count=512 2>/dev/null | tr -d '\0' \
+        || true
+}
+
+unset report
+
+# check for existing pkg config - if exists, disable future runs
+deb_grub_inst_conf=$(awk '/^Name: grub-pc\/install_devices$/,/^$/' \
+     /var/cache/debconf/config.dat)
+if grep -q Value <<<$deb_grub_inst_conf; then
+    existing_values=$(grep Value <<<$deb_grub_inst_conf \
+        | sed "s|^Value:[[:space:]]*||")
+    if [[ -n "$existing_values" ]]; then
+        info "Existing grub-pc install location config found ($existing_values)"
+        info "Disabling this script and exiting."
+        chmod -x $0
+        exit
+    fi
+fi
+
+warn "No existing grub-pc install location config found."
+info "Attempting to locate existing grub-pc install(s)."
+
+parts=$(fdisk -l | egrep -o "/dev/[[:alnum:]]+" | sort -u)
+for part in $parts; do
+    if [[ "$part" != "/dev/mapper" ]]; then
+        first_512bytes=$(check4grub $part)
+        if grep -aq GRUB <<< $first_512bytes; then
+            if [[ -z "$report" ]]; then
+                report="$part"
+            else
+                report="${report}, $part"
+            fi
+        fi
+    fi
+done
+
+if [[ -n "$report" ]]; then
+    info "Grub found installed on device(s): $report"
+    info "Preconfiguring the grub-pc package with this info"
+    debconf-set-selections <<< "grub-pc grub-pc/install_devices multiselect $report"
+    info "Done. Disabling this script and exiting."
+    chmod -x $0
+else
+    warn "Grub install location not found"
+    warn "Please configure manually."
+    exit 1
+fi
